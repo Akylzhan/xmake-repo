@@ -12,6 +12,7 @@ package("slint")
 
     on_install(function (package)
         os.cp("*", package:installdir())
+        package:addenv("LD_LIBRARY_PATH", package:installdir("lib"))
     end)
 
     on_test(function (package)
