@@ -1,11 +1,14 @@
 package("drogon")
-
     set_homepage("https://github.com/an-tao/drogon/")
     set_description("Drogon: A C++14/17/20 based HTTP web application framework running on Linux/macOS/Unix/Windows")
     set_license("MIT")
 
     add_urls("https://github.com/an-tao/drogon/archive/refs/tags/$(version).tar.gz",
-             "https://github.com/an-tao/drogon.git")
+             "https://github.com/an-tao/drogon.git", {submodules = false})
+
+    add_versions("v1.9.11", "f50098bb21bd0013f8da16b796313816bf79b0ecb1d74bfe33216d5400ab2002")
+    add_versions("v1.9.10", "5de93fe16682388f363bb4b26ab00b0253d39108d8e7f53d5637c1b7da59a48f")
+    add_versions("v1.9.9", "4155f78196902ef2f9d06b708897c9e8acaa1536cc4a8c8da9726ceb8ada2aaf")
     add_versions("v1.9.8", "62332a4882cc7db1c7cf04391b65c91ddf6fcbb49af129fc37eb0130809e0449")
     add_versions("v1.9.6", "a81d0ea0e87b0214aa56f7fa7bb851011efe606af67891a0945825104505a08a")
     add_versions("v1.9.5", "ec17882835abeb0672db29cb36ab0c5523f144d5d8ff177861b8f5865803eaae")
@@ -38,6 +41,7 @@ package("drogon")
     if is_plat("windows") then
         add_patches("1.9.6", path.join(os.scriptdir(), "patches", "1.9.6", "windows-build.patch"), "4a798dc3ba7df2f1541ecf66b1b03bab15f200d310ac63f7893770cb3b199453")
     end
+    add_patches("1.9.11", path.join(os.scriptdir(), "patches", "1.9.11", "find-mysql.patch"), "0813b02190dad0bb3e6f524e3f39a8fec1e231153fb91d9869391fd6f2fb91de")
 
     add_configs("c_ares", {description = "Enable async DNS query support.", default = false, type = "boolean"})
     add_configs("mysql", {description = "Enable mysql support.", default = false, type = "boolean"})
@@ -51,16 +55,24 @@ package("drogon")
 
     add_deps("cmake")
     add_deps("jsoncpp", "brotli", "zlib")
+    if not is_plat("windows", "mingw", "msys") then
+        add_deps("libuuid")
+    end
 
     if is_plat("windows") then
         -- enable mtt for drogon
         set_policy("package.msbuild.multi_tool_task", true)
         add_syslinks("ws2_32", "rpcrt4", "crypt32", "advapi32", "iphlpapi")
-    else
-        add_deps("libuuid")
-        if is_plat("linux") then
-            add_syslinks("pthread", "dl")
-        end
+    elseif is_plat("mingw") then
+        add_syslinks("ws2_32", "rpcrt4", "crypt32", "advapi32", "iphlpapi")
+    elseif is_plat("linux", "bsd") then
+        add_syslinks("pthread", "dl")
+    end
+
+    if on_check then
+        on_check("wasm", function (target)
+            raise("package(drogon) dep(openssl) unsupported platform")
+        end)
     end
 
     on_load(function(package)
@@ -77,7 +89,7 @@ package("drogon")
                 package:add("deps", dep)
             end
         end
-        if package:version():le("v1.9.2") then
+        if package:version() and package:version():le("v1.9.2") then
             package:config_set("spdlog", false)
         end
         if package:config("spdlog") then
@@ -88,45 +100,46 @@ package("drogon")
         end
     end)
 
-    on_install("windows|!arm*", "macosx", "linux", function (package)
+    on_install("!android", function (package)
         io.replace("cmake/templates/config.h.in", "\"@COMPILATION_FLAGS@@DROGON_CXX_STANDARD@\"", "R\"(@COMPILATION_FLAGS@@DROGON_CXX_STANDARD@)\"", {plain = true})
         io.replace("cmake_modules/FindMySQL.cmake", "PATH_SUFFIXES mysql", "PATH_SUFFIXES mysql mariadb", {plain = true})
 
-        local configs = {"-DBUILD_EXAMPLES=OFF"}
-        local version = package:version()
-        if version:ge("1.8.4") then
-            table.insert(configs, "-DUSE_SUBMODULE=OFF")
-        end
-        table.insert(configs, "-DCMAKE_BUILD_TYPE=" .. (package:debug() and "Debug" or "Release"))
-
-        -- no support for windows shared library
-        if not package:is_plat("windows") then
-            local shared = package:config("shared") and "ON" or "OFF"
-            if version:ge("1.8.0") then
-                table.insert(configs, "-DBUILD_SHARED_LIBS=" .. shared)
-            else
-                table.insert(configs, "-DBUILD_DROGON_SHARED=" .. shared)
+        local trantor = package:dep("trantor")
+        if (not trantor:is_system() and not trantor:config("shared")) or package:config("openssl") then
+            if package:is_plat("windows", "mingw") then
+                io.replace("CMakeLists.txt", "Trantor::Trantor", "Trantor::Trantor ws2_32 user32 crypt32 advapi32", {plain = true})
             end
         end
+
+        local configs = {
+            "-DBUILD_EXAMPLES=OFF",
+            "-DUSE_SUBMODULE=OFF",
+            "-DBUILD_EXAMPLES=OFF",
+        }
+        table.insert(configs, "-DCMAKE_BUILD_TYPE=" .. (package:is_debug() and "Debug" or "Release"))
+        table.insert(configs, "-DBUILD_SHARED_LIBS=" .. (package:config("shared") and "ON" or "OFF"))
+        table.insert(configs, "-DBUILD_DROGON_SHARED=" .. (package:config("shared") and "ON" or "OFF"))
+        table.insert(configs, "-DBUILD_CTL=" .. (package:is_cross() and "OFF" or "ON"))
 
         for name, enabled in pairs(package:configs()) do
             if not package:extraconf("configs", name, "builtin") then
-                    if name == "sqlite3" then
-                        table.insert(configs, "-DBUILD_SQLITE=" .. (enabled and "ON" or "OFF"))
-                    elseif name == "yaml" then
-                        if version:ge("1.8.4") then
-                            table.insert(configs, "-DBUILD_YAML_CONFIG=" .. (enabled and "ON" or "OFF"))
-                        end
-                    elseif name == "cpp20" then
-                        table.insert(configs, "-DCMAKE_CXX_STANDARD=20")
-                    else
-                        table.insert(configs, "-DBUILD_" .. name:upper() .. "="  .. (enabled and "ON" or "OFF"))
+                if name == "sqlite3" then
+                    table.insert(configs, "-DBUILD_SQLITE=" .. (enabled and "ON" or "OFF"))
+                elseif name == "yaml" then
+                    if package:version() and package:version():ge("1.8.4") then
+                        table.insert(configs, "-DBUILD_YAML_CONFIG=" .. (enabled and "ON" or "OFF"))
                     end
+                elseif name == "cpp20" then
+                    table.insert(configs, "-DCMAKE_CXX_STANDARD=20")
+                else
+                    table.insert(configs, "-DBUILD_" .. name:upper() .. "="  .. (enabled and "ON" or "OFF"))
+                end
             end
         end
 
-        if package:config("pic") ~= false then
-            table.insert(configs, "-DCMAKE_POSITION_INDEPENDENT_CODE=ON")
+        local openssl = package:dep("openssl")
+        if not openssl:is_system() then
+            table.insert(configs, "-DOPENSSL_ROOT_DIR=" .. openssl:installdir())
         end
         import("package.tools.cmake").install(package, configs)
     end)
